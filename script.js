@@ -134,13 +134,13 @@ function getPitch() {
 
 // tones of white: a faint warm hue with very low, fixed saturation,
 // so it reads as "white" rather than a visible color
-let baseHue = 40;
-let baseSaturation = 8;
+let baseHue = 200;
+let baseSaturation = 5;
 // the actual sweep happens on brightness: crisp white (low pitch)
 // down to a soft warm grey (high pitch) — never dark enough to
 // compete with the black pause squares
-let minVoiceBrightness = 65;
-let maxVoiceBrightness = 100;
+let minVoiceBrightness = 78;
+let maxVoiceBrightness = 99;
 
 // maps a frequency in Hz to a brightness value, based on minFreq/maxFreq
 // range — this drives the white-to-grey sweep. Higher pitch = darker/greyer.
