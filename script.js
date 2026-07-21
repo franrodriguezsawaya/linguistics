@@ -1,8 +1,6 @@
 // momaPatterns
 // by francesca rodriguez-sawaya
-// additional code editing by aaron montoya-moraga
-// for moma workshop 2019
-// october 2019
+// july 2026
 // v1.0.0
 
 // variables for debugging
@@ -17,6 +15,20 @@ let rms;
 let audioAnalyzer;
 // mininum volume threshold
 let minVolume = 0.02;
+
+// pitch / intonation variables
+// ml5.js pitch detection object (runs a small ML model, CREPE)
+let pitchDetector;
+// most recent detected pitch, in Hz. null until we get a first reading
+let currentFreq = null;
+// is the pitch model loaded and ready to use
+let isPitchReady = false;
+// path to the hosted pitch-detection model ml5 needs
+const pitchModelPath = "https://cdn.jsdelivr.net/gh/ml5js/ml5-data-and-models/models/pitch-detection/crepe/";
+// typical speaking voice range, used to map Hz -> color
+// (low male voice ~85Hz up to a high excited voice ~400Hz; adjust to taste)
+let minFreq = 85;
+let maxFreq = 400;
 
 // drawing variables
 // current position for drawing
@@ -59,6 +71,9 @@ function setup() {
   // draw with no stroke
   noStroke();
 
+  // use hue/saturation/brightness so we can map pitch (Hz) to hue directly
+  colorMode(HSB, 360, 100, 100);
+
   // adjust framerate to 10 frames per second
   // this affects how often draw() is executed
   frameRate(10);
@@ -71,11 +86,56 @@ function setup() {
   // make analyzer measure loudness of mic
   audioAnalyzer.setInput(mic);
 
-  // turn on mic
-  mic.start();
+  // turn on mic, then start pitch detection once the mic stream is ready
+  mic.start(startPitchDetection);
 
   // start audio context
   touchStarted();
+}
+
+// called once the mic has actually started and has a live stream
+function startPitchDetection() {
+  pitchDetector = ml5.pitchDetection(
+    pitchModelPath,
+    getAudioContext(),
+    mic.stream,
+    modelLoaded
+  );
+}
+
+// called once when the CREPE model finishes loading
+function modelLoaded() {
+  isPitchReady = true;
+  if (isConsoleOn) {
+    console.log("pitch model loaded");
+  }
+  // kick off the first pitch reading; getPitch() re-triggers itself
+  getPitch();
+}
+
+// callback-based loop: ml5 gives us one frequency reading,
+// we store it, then immediately ask for the next one
+function getPitch() {
+  pitchDetector.getPitch(function (err, frequency) {
+    if (err) {
+      if (isConsoleOn) {
+        console.log(err);
+      }
+    } else if (frequency) {
+      currentFreq = frequency;
+      if (isConsoleOn) {
+        console.log("pitch (Hz): " + frequency);
+      }
+    }
+    // ask for the next reading, keep the loop going
+    getPitch();
+  });
+}
+
+// maps a frequency in Hz to a hue (0-360) based on minFreq/maxFreq range
+function freqToHue(freq) {
+  let clampedFreq = constrain(freq, minFreq, maxFreq);
+  return map(clampedFreq, minFreq, maxFreq, 0, 360);
 }
 
 // draw() is executed on a loop, after setup()
@@ -96,23 +156,27 @@ function draw() {
     if (rms < minVolume) {
 
       if (isConsoleOn) {
-        console.log("black");
+        console.log("pause - black");
       }
 
-      // paint the pixel black
-      fill(color(0));
+      // paint the pixel black (hue doesn't matter, brightness 0)
+      fill(color(0, 0, 0));
       square(currentX, currentY, squareWidth*percentageWidth, squareRadius);
     }
     else {
 
+      // there's voice: color the square by pitch instead of plain white
+      // if we don't have a pitch reading yet, fall back to white
+      let hue = (currentFreq && isPitchReady) ? freqToHue(currentFreq) : 0;
+      let saturation = (currentFreq && isPitchReady) ? 80 : 0;
+
       if (isConsoleOn) {
-        console.log("white");
+        console.log("voice - hue:" + hue);
       }
 
-      // paint the pixel white
-      fill(color(255));
+      // paint the pixel with a color mapped from the current pitch
+      fill(color(hue, saturation, 100));
       square(currentX, currentY, squareWidth*percentageWidth, squareRadius);
-      // set(currentPos%width,currentPos/width,color(255));
 
     }
 
@@ -173,6 +237,6 @@ function pressedClear(){
   // reset drawing position
   currentX = 0;
   currentY = 0;
-  // clear canvas and make it white
-  background(255);
+  // clear canvas and make it white (hue 0, saturation 0, full brightness)
+  background(0, 0, 100);
 }
