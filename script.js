@@ -50,10 +50,11 @@ let currentRhythmVariability = null;
 // pace range used to map onset rate -> square size (tune to taste)
 let minPace = 0.15; // slow, sparse bursts of speech
 let maxPace = 1.2;  // fast, rapid-fire bursts
-// resulting size multiplier range — widened for a more dramatic effect
-// (0.3 = less than a third of the normal size, 2.0 = double)
-let minPaceScale = 0.3;
-let maxPaceScale = 2.0;
+// resulting size multiplier range — capped at 1.0 so squares never grow
+// past their current 24px size. Fast pace = full/default size.
+// Slow, sparse pace = shrinks dramatically down toward a tiny dot.
+let minPaceScale = 0.12;
+let maxPaceScale = 1.0;
 
 // how much rhythm irregularity can nudge a square off-grid, in pixels
 let maxJitterPixels = 6;
@@ -82,6 +83,9 @@ let buttonClear = document.getElementById("buttonClear");
 let toggleColor = document.getElementById("toggleColor");
 let togglePace = document.getElementById("togglePace");
 let toggleRhythm = document.getElementById("toggleRhythm");
+
+// live text readout of the underlying pace/rhythm numbers, for testing/tuning
+let debugReadout = document.getElementById("debugReadout");
 
 // current on/off state for each optional layer, read from the checkboxes.
 // pause vs. voice (black vs. not-black) is the one layer that's always on —
@@ -212,8 +216,10 @@ function registerOnset() {
     onsetTimestamps.shift();
   }
 
-  // need at least a few onsets before pace/rhythm mean anything
-  if (onsetTimestamps.length < 3) {
+  // pace needs just 2 onsets (1 interval) to give a first reading —
+  // deliberately fast to react, since the canvas is small and a short
+  // demo shouldn't require several pauses before anything shows up
+  if (onsetTimestamps.length < 2) {
     return;
   }
 
@@ -227,11 +233,13 @@ function registerOnset() {
   let meanInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
   currentPace = 1 / meanInterval;
 
-  // rhythm variability: coefficient of variation of the intervals
-  // (steady rhythm -> low variance -> value close to 0; erratic -> higher)
-  let variance = intervals.reduce((sum, val) => sum + Math.pow(val - meanInterval, 2), 0) / intervals.length;
-  let stdDev = Math.sqrt(variance);
-  currentRhythmVariability = stdDev / meanInterval;
+  // rhythm variability genuinely needs at least 2 intervals (3 onsets) —
+  // you can't measure how consistent gaps are with only one gap to look at
+  if (intervals.length >= 2) {
+    let variance = intervals.reduce((sum, val) => sum + Math.pow(val - meanInterval, 2), 0) / intervals.length;
+    let stdDev = Math.sqrt(variance);
+    currentRhythmVariability = stdDev / meanInterval;
+  }
 
   if (isConsoleOn) {
     console.log("pace (onsets/sec): " + currentPace + " | rhythm variability: " + currentRhythmVariability);
@@ -264,6 +272,19 @@ function draw() {
 
   // update current mic loudness value
   rms = mic.getLevel();
+
+  // compute this every frame (not just while a voice square is being drawn)
+  // so the debug readout below stays live even between bursts of speech
+  let currentScaleValue = paceToScale();
+
+  // live readout of the actual numbers driving pace/rhythm, so you can
+  // confirm what's happening without opening the browser console
+  if (debugReadout) {
+    debugReadout.textContent =
+      "pace: " + (currentPace !== null ? nf(currentPace, 1, 2) + " bursts/sec" : "—") +
+      "   size scale: " + nf(currentScaleValue, 1, 2) + "x" +
+      "   rhythm variability: " + (currentRhythmVariability !== null ? nf(currentRhythmVariability, 1, 2) : "—");
+  }
 
   if (isDrawing) {
 
@@ -304,7 +325,7 @@ function draw() {
 
       // pace controls size (faster bursts = bigger squares) — only if enabled
       // rhythm variability controls jitter (erratic timing = wobble off-grid) — only if enabled
-      let scale = isPaceEnabled ? paceToScale() : 1;
+      let scale = isPaceEnabled ? currentScaleValue : 1;
       let jitter = isRhythmEnabled ? rhythmToJitter() : 0;
       let jitterX = random(-jitter, jitter);
       let jitterY = random(-jitter, jitter);
