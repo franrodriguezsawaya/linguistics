@@ -47,17 +47,24 @@ let currentPace = null;
 // gaps between onsets. 0 = perfectly steady, higher = more erratic
 let currentRhythmVariability = null;
 
-// pace range used to map onset rate -> square size (tune to taste)
+// pace range used to map onset rate -> corner roundness (tune to taste)
 let minPace = 0.15; // slow, sparse bursts of speech
 let maxPace = 1.2;  // fast, rapid-fire bursts
-// resulting size multiplier range — capped at 1.0 so squares never grow
-// past their current 24px size. Fast pace = full/default size.
-// Slow, sparse pace = shrinks dramatically down toward a tiny dot.
-let minPaceScale = 0.12;
-let maxPaceScale = 1.0;
+// resulting corner-radius range, in pixels. Fast pace = sharp corners
+// (urgent, tight). Slow, sparse pace = very round corners, almost
+// circular — visually reads as "space" or give in the delivery.
+let minPaceRadius = 2;   // fast pace: nearly square corners
+let maxPaceRadius = 12;  // slow pace: half of baseSize, fully rounded
 
-// how much rhythm irregularity can nudge a square off-grid, in pixels
-let maxJitterPixels = 6;
+// rhythm is now drawn as a thread connecting consecutive voice squares,
+// rather than moving the squares themselves. Steady rhythm -> a nearly
+// straight line. Erratic rhythm -> a sharp zigzag kink in each segment.
+// max sideways deviation of the kink, in pixels
+let maxThreadDeviationPixels = 20;
+// remembers the center of the last voice square drawn, so we know
+// where to start the next thread segment from. null = no prior square yet
+let prevVoiceCenterX = null;
+let prevVoiceCenterY = null;
 
 // drawing variables
 // current position for drawing
@@ -246,24 +253,25 @@ function registerOnset() {
   }
 }
 
-// maps current pace to a square-size multiplier
-function paceToScale() {
+// maps current pace to a corner-radius value, in pixels
+function paceToRadius() {
   if (currentPace === null) {
-    return 1;
+    return squareRadius; // no data yet: fall back to the default pause-square roundness
   }
   let clampedPace = constrain(currentPace, minPace, maxPace);
-  return map(clampedPace, minPace, maxPace, minPaceScale, maxPaceScale);
+  // note the direction: fast pace -> small radius (sharp), slow pace -> large radius (round)
+  return map(clampedPace, minPace, maxPace, maxPaceRadius, minPaceRadius);
 }
 
-// maps current rhythm variability to a jitter amount, in pixels
-function rhythmToJitter() {
+// maps current rhythm variability to how far the thread's kink deviates, in pixels
+function rhythmToThreadDeviation() {
   if (currentRhythmVariability === null) {
     return 0;
   }
   // cap variability at 1.0 before mapping, so one erratic outlier
-  // doesn't send jitter off the scale
+  // doesn't send the kink off the scale
   let clampedVariability = constrain(currentRhythmVariability, 0, 1);
-  return map(clampedVariability, 0, 1, 0, maxJitterPixels);
+  return map(clampedVariability, 0, 1, 0, maxThreadDeviationPixels);
 }
 
 // draw() is executed on a loop, after setup()
@@ -273,17 +281,19 @@ function draw() {
   // update current mic loudness value
   rms = mic.getLevel();
 
-  // compute this every frame (not just while a voice square is being drawn)
-  // so the debug readout below stays live even between bursts of speech
-  let currentScaleValue = paceToScale();
+  // compute this every frame so the debug readout below stays live
+  // even between bursts of speech
+  let currentRadiusValue = paceToRadius();
+  let currentDeviationValue = rhythmToThreadDeviation();
 
   // live readout of the actual numbers driving pace/rhythm, so you can
   // confirm what's happening without opening the browser console
   if (debugReadout) {
     debugReadout.textContent =
       "pace: " + (currentPace !== null ? nf(currentPace, 1, 2) + " bursts/sec" : "—") +
-      "   size scale: " + nf(currentScaleValue, 1, 2) + "x" +
-      "   rhythm variability: " + (currentRhythmVariability !== null ? nf(currentRhythmVariability, 1, 2) : "—");
+      "   corner radius: " + nf(currentRadiusValue, 1, 1) + "px" +
+      "   rhythm variability: " + (currentRhythmVariability !== null ? nf(currentRhythmVariability, 1, 2) : "—") +
+      "   thread kink: " + nf(currentDeviationValue, 1, 1) + "px";
   }
 
   if (isDrawing) {
@@ -312,7 +322,9 @@ function draw() {
 
       // paint the pixel black (hue doesn't matter, brightness 0)
       // pauses stay plain — no pace/rhythm distortion, so they read
-      // as a clean, calm baseline against the more active voice squares
+      // as a clean, calm baseline against the more active voice squares.
+      // note: we deliberately don't touch prevVoiceCenter here, so the
+      // rhythm thread will "leap" across this pause once voice resumes.
       fill(color(0, 0, 0));
       square(currentX, currentY, squareWidth*percentageWidth, squareRadius);
     }
@@ -323,32 +335,62 @@ function draw() {
       // only applies if the pitch checkbox is on; otherwise plain white
       let brightness = (isColorEnabled && currentFreq && isPitchReady) ? freqToBrightness(currentFreq) : maxVoiceBrightness;
 
-      // pace controls size (faster bursts = bigger squares) — only if enabled
-      // rhythm variability controls jitter (erratic timing = wobble off-grid) — only if enabled
-      let scale = isPaceEnabled ? currentScaleValue : 1;
-      let jitter = isRhythmEnabled ? rhythmToJitter() : 0;
-      let jitterX = random(-jitter, jitter);
-      let jitterY = random(-jitter, jitter);
+      // pace controls corner roundness — sharp for fast, round for slow —
+      // only if the pace checkbox is on; otherwise default roundness
+      let cornerRadius = isPaceEnabled ? currentRadiusValue : squareRadius;
 
       let baseSize = squareWidth * percentageWidth;
-      let scaledSize = baseSize * scale;
-      // keep the scaled square centered in its grid cell, rather than
-      // growing only to the bottom-right, so size changes read cleanly
-      let offsetForScale = (baseSize - scaledSize) / 2;
 
       if (isConsoleOn) {
-        console.log("voice - brightness:" + brightness + " scale:" + scale + " jitter:" + jitter);
+        console.log("voice - brightness:" + brightness + " cornerRadius:" + cornerRadius);
       }
 
       // paint the pixel with a color mapped from the current pitch,
-      // sized by pace, and nudged off-grid by rhythm irregularity
+      // and rounded by how sparse/rapid the current pace is
       fill(color(baseHue, baseSaturation, brightness));
-      square(
-        currentX + offsetForScale + jitterX,
-        currentY + offsetForScale + jitterY,
-        scaledSize,
-        squareRadius
-      );
+      square(currentX, currentY, baseSize, cornerRadius);
+
+      // this square's center, used both to anchor the rhythm thread
+      // and to remember where the next segment should start from
+      let centerX = currentX + baseSize / 2;
+      let centerY = currentY + baseSize / 2;
+
+      // rhythm: draw a thread from the last voice square to this one,
+      // with a sideways kink sized by how erratic the timing has been.
+      // steady rhythm -> nearly straight. erratic rhythm -> a sharp zigzag.
+      if (isRhythmEnabled && prevVoiceCenterX !== null) {
+        let midX = (prevVoiceCenterX + centerX) / 2;
+        let midY = (prevVoiceCenterY + centerY) / 2;
+
+        // perpendicular direction to the segment, so the kink pushes
+        // sideways rather than along the line itself
+        let dx = centerX - prevVoiceCenterX;
+        let dy = centerY - prevVoiceCenterY;
+        let length = sqrt(dx * dx + dy * dy);
+        let perpX = length > 0 ? -dy / length : 0;
+        let perpY = length > 0 ? dx / length : 0;
+
+        // randomize which side the kink falls on, so a steady erratic
+        // rhythm zigzags rather than bowing consistently one way
+        let side = random() < 0.5 ? -1 : 1;
+        let kinkX = midX + perpX * currentDeviationValue * side;
+        let kinkY = midY + perpY * currentDeviationValue * side;
+
+        push();
+        noFill();
+        stroke(0, 0, 40); // neutral mid-grey thread, distinct from black pauses and white/grey squares
+        strokeWeight(1.5);
+        beginShape();
+        vertex(prevVoiceCenterX, prevVoiceCenterY);
+        vertex(kinkX, kinkY);
+        vertex(centerX, centerY);
+        endShape();
+        pop();
+      }
+
+      // remember this square's center for the next thread segment
+      prevVoiceCenterX = centerX;
+      prevVoiceCenterY = centerY;
 
     }
 
@@ -414,6 +456,9 @@ function pressedClear(){
   currentPace = null;
   currentRhythmVariability = null;
   wasSpeaking = false;
+  // reset the rhythm thread too, so it doesn't leap from the old take
+  prevVoiceCenterX = null;
+  prevVoiceCenterY = null;
   // clear canvas and make it white (hue 0, saturation 0, full brightness)
   background(0, 0, 100);
 }
