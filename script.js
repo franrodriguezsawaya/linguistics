@@ -30,6 +30,33 @@ const pitchModelPath = "https://cdn.jsdelivr.net/gh/ml5js/ml5-data-and-models/mo
 let minFreq = 85;
 let maxFreq = 400;
 
+// pace / rhythm variables
+// pace and rhythm are both derived from "onsets" — the moment
+// speech starts after a pause. We track when those happen and
+// use the timing between them, without looking at words at all.
+
+// was the previous frame "speaking"? used to detect the silence->voice moment
+let wasSpeaking = false;
+// timestamps (ms, from millis()) of the last several onsets
+let onsetTimestamps = [];
+// how many onsets to keep in the rolling window
+let maxOnsetsTracked = 8;
+// current estimated pace, in onsets per second. null until we have enough data
+let currentPace = null;
+// current estimated rhythm irregularity: coefficient of variation of the
+// gaps between onsets. 0 = perfectly steady, higher = more erratic
+let currentRhythmVariability = null;
+
+// pace range used to map onset rate -> square size (tune to taste)
+let minPace = 0.15; // slow, sparse bursts of speech
+let maxPace = 1.2;  // fast, rapid-fire bursts
+// resulting size multiplier range
+let minPaceScale = 0.6;
+let maxPaceScale = 1.3;
+
+// how much rhythm irregularity can nudge a square off-grid, in pixels
+let maxJitterPixels = 6;
+
 // drawing variables
 // current position for drawing
 // let currentPos = 0;
@@ -50,9 +77,32 @@ let squareRadius = 7;
 let buttonStart = document.getElementById("buttonStart");
 let buttonClear = document.getElementById("buttonClear");
 
+// checkboxes that make each added layer optional
+let toggleColor = document.getElementById("toggleColor");
+let togglePace = document.getElementById("togglePace");
+let toggleRhythm = document.getElementById("toggleRhythm");
+
+// current on/off state for each optional layer, read from the checkboxes.
+// pause vs. voice (black vs. not-black) is the one layer that's always on —
+// everything else here is an optional addition on top of it
+let isColorEnabled = toggleColor.checked;
+let isPaceEnabled = togglePace.checked;
+let isRhythmEnabled = toggleRhythm.checked;
+
 // add event listeners to buttons
 buttonStart.addEventListener("click", pressedStart);
 buttonClear.addEventListener("click", pressedClear);
+
+// add event listeners to checkboxes, so toggling one updates its state immediately
+toggleColor.addEventListener("change", function () {
+  isColorEnabled = toggleColor.checked;
+});
+togglePace.addEventListener("change", function () {
+  isPaceEnabled = togglePace.checked;
+});
+toggleRhythm.addEventListener("change", function () {
+  isRhythmEnabled = toggleRhythm.checked;
+});
 
 // setup() function happens once, at the beginning
 // triggered by p5.js
@@ -132,13 +182,13 @@ function getPitch() {
   });
 }
 
-// tones of white: a faint warm hue with very low, fixed saturation,
+// tones of white: a faint, cool hue with very low, fixed saturation,
 // so it reads as "white" rather than a visible color
 let baseHue = 200;
 let baseSaturation = 5;
 // the actual sweep happens on brightness: crisp white (low pitch)
-// down to a soft warm grey (high pitch) — never dark enough to
-// compete with the black pause squares
+// down to a soft cool-grey (high pitch) — kept in a narrower band
+// for a subtler effect, still nowhere near black
 let minVoiceBrightness = 78;
 let maxVoiceBrightness = 99;
 
@@ -147,6 +197,64 @@ let maxVoiceBrightness = 99;
 function freqToBrightness(freq) {
   let clampedFreq = constrain(freq, minFreq, maxFreq);
   return map(clampedFreq, minFreq, maxFreq, maxVoiceBrightness, minVoiceBrightness);
+}
+
+// called every time speech starts right after a pause — an "onset".
+// this is where pace and rhythm actually get measured, using only timing,
+// never the words themselves
+function registerOnset() {
+  let now = millis();
+  onsetTimestamps.push(now);
+  // keep only the most recent onsets, so pace/rhythm reflect recent
+  // speech rather than the whole recording
+  if (onsetTimestamps.length > maxOnsetsTracked) {
+    onsetTimestamps.shift();
+  }
+
+  // need at least a few onsets before pace/rhythm mean anything
+  if (onsetTimestamps.length < 3) {
+    return;
+  }
+
+  // gaps between consecutive onsets, in seconds
+  let intervals = [];
+  for (let i = 1; i < onsetTimestamps.length; i++) {
+    intervals.push((onsetTimestamps[i] - onsetTimestamps[i - 1]) / 1000);
+  }
+
+  // pace: how often bursts of speech are starting
+  let meanInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+  currentPace = 1 / meanInterval;
+
+  // rhythm variability: coefficient of variation of the intervals
+  // (steady rhythm -> low variance -> value close to 0; erratic -> higher)
+  let variance = intervals.reduce((sum, val) => sum + Math.pow(val - meanInterval, 2), 0) / intervals.length;
+  let stdDev = Math.sqrt(variance);
+  currentRhythmVariability = stdDev / meanInterval;
+
+  if (isConsoleOn) {
+    console.log("pace (onsets/sec): " + currentPace + " | rhythm variability: " + currentRhythmVariability);
+  }
+}
+
+// maps current pace to a square-size multiplier
+function paceToScale() {
+  if (currentPace === null) {
+    return 1;
+  }
+  let clampedPace = constrain(currentPace, minPace, maxPace);
+  return map(clampedPace, minPace, maxPace, minPaceScale, maxPaceScale);
+}
+
+// maps current rhythm variability to a jitter amount, in pixels
+function rhythmToJitter() {
+  if (currentRhythmVariability === null) {
+    return 0;
+  }
+  // cap variability at 1.0 before mapping, so one erratic outlier
+  // doesn't send jitter off the scale
+  let clampedVariability = constrain(currentRhythmVariability, 0, 1);
+  return map(clampedVariability, 0, 1, 0, maxJitterPixels);
 }
 
 // draw() is executed on a loop, after setup()
@@ -162,15 +270,27 @@ function draw() {
       console.log("rms:" + rms);
     }
 
+    // is there voice right now, this frame?
+    let isSpeaking = rms >= minVolume;
+
+    // onset = the exact moment we go from pause to voice.
+    // this is the only thing pace/rhythm are measured from.
+    if (isSpeaking && !wasSpeaking) {
+      registerOnset();
+    }
+    wasSpeaking = isSpeaking;
+
     // update currentPos
     // check if volume is less than minVolume
-    if (rms < minVolume) {
+    if (!isSpeaking) {
 
       if (isConsoleOn) {
         console.log("pause - black");
       }
 
       // paint the pixel black (hue doesn't matter, brightness 0)
+      // pauses stay plain — no pace/rhythm distortion, so they read
+      // as a clean, calm baseline against the more active voice squares
       fill(color(0, 0, 0));
       square(currentX, currentY, squareWidth*percentageWidth, squareRadius);
     }
@@ -178,16 +298,35 @@ function draw() {
 
       // there's voice: sweep brightness from white (low pitch)
       // to warm grey (high pitch), keeping hue/saturation nearly flat
-      // if we don't have a pitch reading yet, fall back to plain white
-      let brightness = (currentFreq && isPitchReady) ? freqToBrightness(currentFreq) : maxVoiceBrightness;
+      // only applies if the pitch checkbox is on; otherwise plain white
+      let brightness = (isColorEnabled && currentFreq && isPitchReady) ? freqToBrightness(currentFreq) : maxVoiceBrightness;
+
+      // pace controls size (faster bursts = bigger squares) — only if enabled
+      // rhythm variability controls jitter (erratic timing = wobble off-grid) — only if enabled
+      let scale = isPaceEnabled ? paceToScale() : 1;
+      let jitter = isRhythmEnabled ? rhythmToJitter() : 0;
+      let jitterX = random(-jitter, jitter);
+      let jitterY = random(-jitter, jitter);
+
+      let baseSize = squareWidth * percentageWidth;
+      let scaledSize = baseSize * scale;
+      // keep the scaled square centered in its grid cell, rather than
+      // growing only to the bottom-right, so size changes read cleanly
+      let offsetForScale = (baseSize - scaledSize) / 2;
 
       if (isConsoleOn) {
-        console.log("voice - brightness:" + brightness);
+        console.log("voice - brightness:" + brightness + " scale:" + scale + " jitter:" + jitter);
       }
 
-      // paint the pixel with a color mapped from the current pitch
+      // paint the pixel with a color mapped from the current pitch,
+      // sized by pace, and nudged off-grid by rhythm irregularity
       fill(color(baseHue, baseSaturation, brightness));
-      square(currentX, currentY, squareWidth*percentageWidth, squareRadius);
+      square(
+        currentX + offsetForScale + jitterX,
+        currentY + offsetForScale + jitterY,
+        scaledSize,
+        squareRadius
+      );
 
     }
 
@@ -248,6 +387,11 @@ function pressedClear(){
   // reset drawing position
   currentX = 0;
   currentY = 0;
+  // reset pace/rhythm tracking so a new take starts with a clean slate
+  onsetTimestamps = [];
+  currentPace = null;
+  currentRhythmVariability = null;
+  wasSpeaking = false;
   // clear canvas and make it white (hue 0, saturation 0, full brightness)
   background(0, 0, 100);
 }
