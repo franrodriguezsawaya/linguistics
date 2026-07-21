@@ -50,9 +50,10 @@ let currentRhythmVariability = null;
 // pace range used to map onset rate -> square size (tune to taste)
 let minPace = 0.15; // slow, sparse bursts of speech
 let maxPace = 1.2;  // fast, rapid-fire bursts
-// resulting size multiplier range
-let minPaceScale = 0.6;
-let maxPaceScale = 1.3;
+// resulting size multiplier range — widened for a more dramatic effect
+// (0.3 = less than a third of the normal size, 2.0 = double)
+let minPaceScale = 0.3;
+let maxPaceScale = 2.0;
 
 // how much rhythm irregularity can nudge a square off-grid, in pixels
 let maxJitterPixels = 6;
